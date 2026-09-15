@@ -38,6 +38,17 @@ Run the built-in tool/resource/prompt demo instead (no LLM involved):
 uv run learning-mcp-client --demo
 ```
 
+`src/learning_mcp/tool.py` defines a local tool and an MCP tool in one file
+and shows what actually differs *at registration*: the MCP tool (`add`) is
+registered up front with `@server.tool()`; the local tool (`multiply`) is
+never registered at all, it's just a function handed to Ollama at call
+time. See "Local tool vs. MCP tool" in `MCP_Overview.md`. Requires `ollama
+serve` running with `gemma4` pulled:
+
+```bash
+uv run learning-mcp-local-vs-mcp
+```
+
 ## Run over HTTP
 
 Start the server in one terminal:

@@ -88,18 +88,34 @@ in the chat loop — the difference is *where the function lives* and *who
 runs it*.
 
 **Local tool** — a plain Python function defined in the same process as the
-host, whose schema is generated straight from its signature and docstring
-(e.g. `ollama._utils.convert_function_to_tool`). When the model requests it,
-the host calls it directly, in-process, with no network hop.
+host. There's no registration step: it becomes callable by the LLM only at
+the moment you build the `tools` list and hand the function straight to
+`ollama.chat(tools=[multiply])`, which reads its signature/docstring right
+there, per call (e.g. `ollama._utils.convert_function_to_tool`). When the
+model requests it, the host calls it directly, in-process, with no network
+hop.
 
-**MCP tool** — a function defined on a separate MCP *server*, possibly a
-different process or a different machine entirely. The host never calls it
-directly; it goes through a `ClientSession` over a transport (stdio, HTTP).
-When the model requests it, the host sends `call_tool(name, args)` as an
-RPC and waits for the server's response.
+**MCP tool** — a function registered once, up front, on a separate MCP
+*server* object, via a decorator:
+
+```python
+@server.tool()
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+```
+
+That decorator runs at import time — before any LLM conversation exists —
+and adds `add` to the server's own tool registry. From then on, any client
+that connects to this server discovers it the same way, by calling
+`list_tools()`; the host never calls the function itself, it goes through a
+`ClientSession` over a transport (stdio, HTTP) and sends `call_tool(name,
+args)` as an RPC, waiting for the server's response.
 
 | | Local tool | MCP tool |
 |---|---|---|
+| Registered | never — it's just a function | once, at import time, via `@server.tool()` |
+| Registration lives in | nowhere — re-derived from the function every `chat()` call | the server's tool registry (what answers `list_tools()`) |
 | Defined | in the host's own code | on a separate MCP server |
 | Schema comes from | the function's signature/docstring | the server's `list_tools()` response |
 | Execution | direct in-process call | RPC over stdio/HTTP to the server |
@@ -107,14 +123,32 @@ RPC and waits for the server's response.
 | Reusable across hosts | no — copy the function into each host | yes — any MCP host can connect to the same server |
 | Add a new tool | edit the host's code | edit the server; every connected host sees it via `list_tools()` |
 | Failure mode | a Python exception in the host | a network/transport error, independent of the host process |
-| Example in this repo | none — everything here is server-defined | `add`, `echo` in `src/learning_mcp/server.py` |
+| Example in this repo | `multiply` in `src/learning_mcp/tool.py` | `add` in `src/learning_mcp/tool.py` |
 
-In `run_agent()`, every tool in the `tools` list comes from
-`session.list_tools()` — this project only uses MCP tools, on purpose, to
-demonstrate the protocol. A local tool would skip the server entirely: you'd
-hand `ollama.chat()` a Python function directly and it would run in
-`client.py` itself, with no `ClientSession`, no subprocess, and no
-`call_tool()` RPC involved.
+`src/learning_mcp/tool.py` puts both in one file, on purpose, so the
+registration difference is the *only* thing that differs — `add` is
+registered on an `MCPServer` with `@server.tool()`, `multiply` is just a
+`def`. Running the file with `--serve` makes it act as the MCP server
+(the demo spawns `python tool.py --serve` as a subprocess of itself); with
+no args, it plays the host: it asks that server's `list_tools()` for `add`,
+hands both tools to Ollama in one `tools` list, and dispatches each call the
+LLM asks for down its own path:
+
+```python
+if name == "multiply":
+    result = multiply(**args)                       # local tool: direct call
+else:
+    response = await session.call_tool(name, args)   # MCP tool: RPC to server
+    result = response.content[0].text
+```
+
+`multiply` runs immediately, in this process, and returns a real Python
+number. `add` is answered by the server subprocess, reached only through
+`session.call_tool()`, with the result coming back as text. Run it with:
+
+```bash
+uv run learning-mcp-local-vs-mcp
+```
 
 ## The N×M problem MCP solves
 
